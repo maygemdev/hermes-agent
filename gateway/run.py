@@ -19409,14 +19409,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Plugin-registered slash commands
         if command:
             try:
-                from hermes_cli.plugins import get_plugin_command_handler
+                from hermes_cli.plugins import (
+                    get_plugin_command_handler,
+                    invoke_plugin_command_handler,
+                )
                 # Normalize underscores to hyphens so Telegram's underscored
                 # autocomplete form matches plugin commands registered with
                 # hyphens. See hermes_cli/commands.py:_build_telegram_menu.
                 plugin_handler = get_plugin_command_handler(command.replace("_", "-"))
                 if plugin_handler:
                     user_args = event.get_command_args().strip()
-                    result = plugin_handler(user_args)
+                    from gateway.request_context import gateway_request_context_from_event
+
+                    result = invoke_plugin_command_handler(
+                        plugin_handler,
+                        user_args,
+                        gateway_context=gateway_request_context_from_event(
+                            event, session_id=_quick_key
+                        ),
+                    )
                     if asyncio.iscoroutine(result):
                         result = await result
                     return str(result) if result else None
@@ -20625,7 +20636,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         context = build_session_context(source, self.config, session_entry)
         
         # Set session context variables for tools (task-local, concurrency-safe)
-        _session_env_tokens = self._set_session_env(context)
+        _session_env_tokens = self._set_session_env(
+            context, authenticated_user=not bool(getattr(event, "internal", False))
+        )
         
         # Read privacy.redact_pii from config (re-read per message)
         _redact_pii = False
@@ -26470,7 +26483,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     exc,
                 )
 
-    def _set_session_env(self, context: SessionContext) -> list:
+    def _set_session_env(
+        self, context: SessionContext, *, authenticated_user: bool = True
+    ) -> list:
         """Set session context variables for the current async task.
 
         Uses ``contextvars`` instead of ``os.environ`` so that concurrent
@@ -26491,6 +26506,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _adapter = _adapters.get(context.source.platform)
         _async_delivery = getattr(_adapter, "supports_async_delivery", True)
         return set_session_vars(
+            source="gateway" if authenticated_user else "gateway_internal",
             platform=context.source.platform.value,
             chat_id=context.source.chat_id,
             chat_type=(

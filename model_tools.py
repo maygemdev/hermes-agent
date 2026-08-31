@@ -1550,12 +1550,19 @@ def handle_function_call(
                         enabled_tools=sandbox_enabled,
                     )
             else:
+                from gateway.request_context import current_gateway_request_context
+
+                _gateway_context = current_gateway_request_context(
+                    session_id=session_id or ""
+                )
+
                 def _dispatch(next_args: Dict[str, Any]) -> Any:
                     return registry.dispatch(
                         function_name, next_args,
                         task_id=task_id,
                         session_id=session_id,
                         user_task=user_task,
+                        gateway_context=_gateway_context,
                     )
             if skip_tool_execution_middleware:
                 result = _dispatch(function_args)

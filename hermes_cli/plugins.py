@@ -7048,6 +7048,28 @@ def get_plugin_command_handler(name: str) -> Optional[Callable]:
     return entry["handler"] if entry else None
 
 
+def invoke_plugin_command_handler(
+    handler: Callable, raw_args: str, *, gateway_context: Any = None
+) -> Any:
+    """Invoke a command handler with optional immutable gateway provenance.
+
+    Existing one-argument plugin commands remain byte-for-byte compatible.
+    New handlers opt in by declaring ``gateway_context`` or ``**kwargs``.
+    """
+    try:
+        parameters = inspect.signature(handler).parameters.values()
+    except (TypeError, ValueError):
+        return handler(raw_args)
+    accepts_context = any(
+        parameter.name == "gateway_context"
+        or parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+    if accepts_context:
+        return handler(raw_args, gateway_context=gateway_context)
+    return handler(raw_args)
+
+
 _PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS = 30.0
 
 
