@@ -2,10 +2,21 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from gateway.session_context import get_session_env
+
+
+logger = logging.getLogger(__name__)
+
+
+def _reject(reason: str) -> None:
+    """Log only the rejection class, never bound identity values."""
+
+    logger.debug("authenticated gateway context rejected: reason=%s", reason)
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,7 +38,14 @@ def current_gateway_request_context(
     """Return the authenticated context or ``None`` for unsafe origins."""
 
     if get_session_env("HERMES_SESSION_SOURCE", "") != "gateway":
-        return None
+        return _reject("unauthenticated_source")
+
+    bound_session_id = get_session_env("HERMES_SESSION_ID", "")
+    if not isinstance(bound_session_id, str) or not bound_session_id:
+        return _reject("incomplete_context")
+    if session_id and session_id != bound_session_id:
+        return _reject("session_id_mismatch")
+
     values = {
         "platform": get_session_env("HERMES_SESSION_PLATFORM", ""),
         "workspace_id": get_session_env("HERMES_SESSION_SCOPE_ID", ""),
@@ -35,19 +53,22 @@ def current_gateway_request_context(
         "channel_id": get_session_env("HERMES_SESSION_CHAT_ID", ""),
         "thread_id": get_session_env("HERMES_SESSION_THREAD_ID", ""),
         "message_id": get_session_env("HERMES_SESSION_MESSAGE_ID", ""),
-        "session_id": session_id or get_session_env("HERMES_SESSION_ID", ""),
+        "session_id": bound_session_id,
     }
     if not all(isinstance(value, str) and value for value in values.values()):
-        return None
+        return _reject("incomplete_context")
     return GatewayRequestContext(**values)
+
 
 def gateway_request_context_from_event(
     event: Any, *, session_id: str
 ) -> Optional[GatewayRequestContext]:
     """Build a frozen context directly from an authenticated gateway event."""
 
-    if event is None or getattr(event, "internal", False):
-        return None
+    if event is None:
+        return _reject("missing_event")
+    if getattr(event, "internal", False):
+        return _reject("internal_event")
     source = getattr(event, "source", None)
     platform_value = getattr(getattr(source, "platform", None), "value", "")
     values = {
@@ -64,5 +85,5 @@ def gateway_request_context_from_event(
         "session_id": str(session_id or ""),
     }
     if not all(values.values()):
-        return None
+        return _reject("incomplete_event_context")
     return GatewayRequestContext(**values)
