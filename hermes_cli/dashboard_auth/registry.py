@@ -122,6 +122,15 @@ def list_session_providers() -> List[DashboardAuthProvider]:
     return [p for p in list_providers() if getattr(p, "supports_session", True)]
 
 
+def list_request_providers() -> List[DashboardAuthProvider]:
+    """Providers that authenticate signed identity on each HTTP request."""
+    return [
+        provider
+        for provider in list_providers()
+        if getattr(provider, "supports_request_auth", False)
+    ]
+
+
 def register_global_provider(provider: DashboardAuthProvider) -> None:
     """Register a host-owned provider in the process-global slot (upsert).
 

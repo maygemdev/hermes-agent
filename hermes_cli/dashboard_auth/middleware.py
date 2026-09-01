@@ -22,7 +22,10 @@ from typing import Awaitable, Callable
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
-from hermes_cli.dashboard_auth import list_session_providers
+from hermes_cli.dashboard_auth import (
+    list_request_providers,
+    list_session_providers,
+)
 from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
 from hermes_cli.dashboard_auth.base import (
     DashboardAuthProvider,
@@ -107,6 +110,34 @@ def _ordered_session_providers(
     if provider_hint:
         providers.sort(key=lambda provider: provider.name != provider_hint)
     return providers
+
+
+def _verify_request_identity(request: Request):
+    """Verify a signed identity supplied by an upstream request provider.
+
+    Providers stack in registration order. An unavailable verifier does not
+    mask a later provider that can authenticate the request; if none accepts
+    and at least one was unavailable, propagate a transient failure rather
+    than turning uncertainty into a login redirect.
+    """
+    unavailable_provider: str | None = None
+    for provider in list_request_providers():
+        try:
+            session = provider.verify_request(headers=request.headers)
+        except ProviderError as error:
+            _log.warning(
+                "dashboard-auth: request provider %r unreachable: %s",
+                provider.name,
+                error,
+            )
+            if unavailable_provider is None:
+                unavailable_provider = provider.name
+            continue
+        if session is not None:
+            return session
+    if unavailable_provider is not None:
+        raise ProviderError(unavailable_provider)
+    return None
 
 
 def _unauth_response(request: Request, *, reason: str) -> Response:
@@ -341,6 +372,22 @@ async def gated_auth_middleware(
 
     path = request.url.path
     if _path_is_public(path):
+        return await call_next(request)
+
+    # Identity-aware reverse proxies attach a signed assertion to every
+    # protected origin request. Verify it before the interactive bearer/cookie
+    # flows; success is request-scoped and deliberately mints no Hermes cookie.
+    # The same assertion on POST /api/auth/ws-ticket yields the ordinary
+    # single-use ticket used by all dashboard WebSockets.
+    try:
+        request_session = _verify_request_identity(request)
+    except ProviderError as error:
+        return JSONResponse(
+            {"detail": f"Auth provider {str(error)!r} unreachable"},
+            status_code=503,
+        )
+    if request_session is not None:
+        request.state.session = request_session
         return await call_next(request)
 
     # RFC 8252 native-app bearer path (goal: no session cookies). The desktop

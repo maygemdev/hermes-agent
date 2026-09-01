@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Optional
 
@@ -192,6 +193,12 @@ class DashboardAuthProvider(ABC):
     # supports_token.
     supports_session: bool = True
 
+    # When True, the provider can authenticate a request from immutable
+    # upstream headers (for example, an identity-aware reverse proxy). Such a
+    # provider is deliberately separate from the interactive cookie flow: it
+    # does not appear on the login page and does not mint Hermes cookies.
+    supports_request_auth: bool = False
+
     @abstractmethod
     def start_login(self, *, redirect_uri: str) -> LoginStart: ...
 
@@ -276,6 +283,24 @@ class DashboardAuthProvider(ABC):
             f"{type(self).__name__} does not support token auth "
             "(set supports_token = True and override verify_token)"
         )
+
+    def verify_request(
+        self, *, headers: Mapping[str, str]
+    ) -> "Optional[Session]":
+        """Verify identity asserted on one proxied HTTP request.
+
+        Providers opt in with ``supports_request_auth = True``. Return a
+        verified :class:`Session` when the immutable request headers carry a
+        valid identity, ``None`` when they do not, and raise
+        :class:`ProviderError` only when an external verifier or key source is
+        unavailable. The default implementation preserves compatibility with
+        existing providers.
+
+        Request-auth providers must verify signed material rather than trust
+        a plain user or email header. Hermes passes the read-only ASGI header
+        mapping and never accepts identity fields from route parameters.
+        """
+        return None
 
 
 def assert_protocol_compliance(cls: type) -> None:
