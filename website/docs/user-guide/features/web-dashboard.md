@@ -110,9 +110,11 @@ The status page auto-refreshes every 5 seconds.
 When the host is running low on memory or disk, a banner appears at the top of
 the dashboard (fed by the same status poll — no extra requests):
 
-- **"Your agent is almost out of memory and may restart"** — system available
-  memory has dropped to *elevated* (< 128 MiB or < 15%) or *critical*
-  (< 64 MiB or < 5%) levels, as sampled by the gateway's 30-second heartbeat.
+- **"Your agent is almost out of memory and may restart"** — effective
+  available memory has dropped to *elevated* (< 128 MiB or < 15%) or
+  *critical* (< 64 MiB or < 5%) levels, as sampled by the gateway's 30-second
+  heartbeat. In a container, the finite cgroup limit and current usage define
+  that effective memory boundary instead of the host's node-wide totals.
 - **"Your agent restarted unexpectedly, most likely because it ran out of
   memory"** — the lifecycle ledger recorded an unclean exit under memory
   pressure on the previous boot (a suspected OOM kill).

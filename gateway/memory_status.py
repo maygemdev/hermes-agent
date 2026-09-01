@@ -5,7 +5,8 @@ want to know about, but all of it dies in log files:
 
 * :func:`gateway.shutdown_watchdog.write_loop_heartbeat` embeds a
   :func:`gateway.lifecycle_ledger.sample_memory` snapshot (gateway RSS +
-  system MemAvailable/MemTotal + swap) in ``state/gateway.heartbeat``
+  effective host/cgroup available and total memory + swap) in
+  ``state/gateway.heartbeat``
   every 30 seconds.
 * :func:`gateway.lifecycle_ledger.record_startup` detects an unclean
   previous death and flags ``suspected_oom`` — but only into
@@ -42,7 +43,7 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# Pressure thresholds on system MemAvailable.  ``critical`` deliberately
+# Pressure thresholds on effective available memory. ``critical`` deliberately
 # mirrors the lifecycle ledger's OOM-suspicion heuristics
 # (:data:`gateway.lifecycle_ledger._LOW_MEM_AVAILABLE_KIB` /
 # ``_LOW_MEM_AVAILABLE_FRACTION``): if a memory level would make a

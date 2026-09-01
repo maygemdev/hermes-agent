@@ -7,6 +7,7 @@ The ledger is a tiny sentinel state machine:
 sentinel from a dead process as an unclean death (SIGKILL / OOM / VM loss)
 and enriches the report with the last heartbeat's memory sample.
 """
+
 from __future__ import annotations
 
 import json
@@ -16,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+import gateway.lifecycle_ledger as lifecycle_ledger
+from gateway.memory_status import classify_pressure
 from gateway.lifecycle_ledger import (
     detect_unclean_exit,
     get_lifecycle_sentinel_path,
@@ -73,6 +76,92 @@ def test_sample_memory_has_expected_keys_on_linux() -> None:
     assert sample.get("rss_kib", 0) > 0
     assert sample.get("mem_total_kib", 0) > 0
     assert "mem_available_kib" in sample
+
+
+def _cgroup_file(path: Path, value: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(value, encoding="utf-8")
+    return path
+
+
+def test_cgroup_v2_memory_high_takes_precedence_over_memory_max(tmp_path: Path) -> None:
+    current = _cgroup_file(tmp_path / "memory.current", str(512 * 1024**2))
+    high = _cgroup_file(tmp_path / "memory.high", str(2 * 1024**3))
+    maximum = _cgroup_file(tmp_path / "memory.max", str(4 * 1024**3))
+
+    sample = lifecycle_ledger._sample_cgroup_memory((
+        (high, current),
+        (maximum, current),
+    ))
+
+    assert sample == (2 * 1024**2, 1536 * 1024)
+
+
+def test_cgroup_v2_unlimited_high_falls_back_to_memory_max(tmp_path: Path) -> None:
+    current = _cgroup_file(tmp_path / "memory.current", str(256 * 1024**2))
+    high = _cgroup_file(tmp_path / "memory.high", "max\n")
+    maximum = _cgroup_file(tmp_path / "memory.max", str(4 * 1024**3))
+
+    sample = lifecycle_ledger._sample_cgroup_memory((
+        (high, current),
+        (maximum, current),
+    ))
+
+    assert sample == (4 * 1024**2, 3840 * 1024)
+
+
+def test_cgroup_v1_limit_and_usage_are_supported(tmp_path: Path) -> None:
+    limit = _cgroup_file(tmp_path / "memory.limit_in_bytes", str(1024**3))
+    usage = _cgroup_file(tmp_path / "memory.usage_in_bytes", str(128 * 1024**2))
+
+    assert lifecycle_ledger._sample_cgroup_memory(((limit, usage),)) == (
+        1024 * 1024,
+        896 * 1024,
+    )
+
+
+@pytest.mark.parametrize("limit", ["", "garbage", "0", str(1 << 62)])
+def test_invalid_or_effectively_unlimited_cgroup_is_ignored(
+    tmp_path: Path, limit: str
+) -> None:
+    limit_path = _cgroup_file(tmp_path / "limit", limit)
+    usage_path = _cgroup_file(tmp_path / "usage", "123")
+
+    assert lifecycle_ledger._sample_cgroup_memory(((limit_path, usage_path),)) is None
+
+
+def test_sample_memory_uses_finite_cgroup_as_effective_boundary(monkeypatch) -> None:
+    monkeypatch.setattr(
+        lifecycle_ledger,
+        "_sample_cgroup_memory",
+        lambda: (4 * 1024**2, 3800 * 1024),
+    )
+
+    sample = sample_memory()
+
+    assert sample["mem_total_kib"] == 4 * 1024**2
+    assert sample["mem_available_kib"] == 3800 * 1024
+    assert (
+        classify_pressure(sample["mem_available_kib"], sample["mem_total_kib"])
+        == "ok"
+    )
+
+
+def test_cgroup_larger_than_host_does_not_replace_host_memory() -> None:
+    sample = {
+        "mem_total_kib": 2 * 1024**2,
+        "mem_available_kib": 1024**2,
+    }
+
+    lifecycle_ledger._apply_cgroup_memory_boundary(
+        sample,
+        (4 * 1024**2, 3800 * 1024),
+    )
+
+    assert sample == {
+        "mem_total_kib": 2 * 1024**2,
+        "mem_available_kib": 1024**2,
+    }
 
 
 # ---------------------------------------------------------------------------

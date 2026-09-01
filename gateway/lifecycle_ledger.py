@@ -26,7 +26,7 @@ This module closes that gap with a tiny state machine persisted to
   exits, #53107) and the two watchdog ``os._exit`` sites in
   :mod:`gateway.shutdown_watchdog`.
 
-:func:`sample_memory` provides the cheap (<1ms, pure /proc reads) memory
+:func:`sample_memory` provides the cheap (<1ms, procfs/cgroup reads) memory
 snapshot that :func:`gateway.shutdown_watchdog.write_loop_heartbeat`
 embeds in the 30s heartbeat — giving every unclean-death report a
 "memory available N seconds before death" data point so OOM crash cycles
@@ -45,7 +45,7 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,8 @@ _STATE_DB_RELATIVE = ("state.db",)
 # hint; classification stays with the human reading the evidence.
 _LOW_MEM_AVAILABLE_KIB = 64 * 1024  # < 64 MiB available
 _LOW_MEM_AVAILABLE_FRACTION = 0.05  # < 5% of MemTotal available
+_CGROUP_UNLIMITED_BYTES = 1 << 62
+_BYTES_PER_KIB = 1024
 
 
 def _process_hermes_home() -> Path:
@@ -76,11 +78,99 @@ def get_lifecycle_sentinel_path(home: Optional[Path] = None) -> Path:
     return base.joinpath(*_LIFECYCLE_RELATIVE)
 
 
-def sample_memory() -> Dict[str, Any]:
-    """Cheap memory snapshot: own RSS + system availability + swap.
+def _cgroup_memory_candidates() -> Tuple[Tuple[Path, Path], ...]:
+    """Return ordered cgroup memory limit/usage file pairs.
 
-    Pure ``/proc`` reads, Linux-only (returns ``{}`` elsewhere), never
-    raises.  Values in KiB to match the kernel's units.
+    cgroup v2 ``memory.high`` is the effective throttling boundary and takes
+    precedence over ``memory.max``. The process-specific hierarchy is tried
+    before container-root fallbacks. cgroup v1 is retained for older Docker
+    and systemd hosts.
+    """
+    v2_paths: list[str] = []
+    v1_paths: list[str] = []
+    try:
+        contents = Path("/proc/self/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        contents = ""
+    for line in contents.splitlines():
+        try:
+            hierarchy, controllers, relative = line.split(":", 2)
+        except ValueError:
+            continue
+        relative = relative.strip() or "/"
+        if hierarchy == "0" and not controllers:
+            v2_paths.append(relative)
+        elif "memory" in controllers.split(","):
+            v1_paths.append(relative)
+
+    if "/" not in v2_paths:
+        v2_paths.append("/")
+    if "/" not in v1_paths:
+        v1_paths.append("/")
+
+    candidates: list[Tuple[Path, Path]] = []
+    seen: set[Tuple[Path, Path]] = set()
+    for relative in v2_paths:
+        base = Path("/sys/fs/cgroup") / relative.lstrip("/")
+        for limit_name in ("memory.high", "memory.max"):
+            pair = (base / limit_name, base / "memory.current")
+            if pair not in seen:
+                seen.add(pair)
+                candidates.append(pair)
+    for relative in v1_paths:
+        base = Path("/sys/fs/cgroup/memory") / relative.lstrip("/")
+        pair = (base / "memory.limit_in_bytes", base / "memory.usage_in_bytes")
+        if pair not in seen:
+            seen.add(pair)
+            candidates.append(pair)
+    return tuple(candidates)
+
+
+def _sample_cgroup_memory(
+    candidates: Optional[Iterable[Tuple[Path, Path]]] = None,
+) -> Optional[Tuple[int, int]]:
+    """Return finite cgroup ``(total_kib, available_kib)`` when capped."""
+    source = _cgroup_memory_candidates() if candidates is None else candidates
+    for limit_path, usage_path in source:
+        try:
+            raw_limit = limit_path.read_text(encoding="utf-8").strip()
+            raw_usage = usage_path.read_text(encoding="utf-8").strip()
+            if not raw_limit or raw_limit == "max":
+                continue
+            limit = int(raw_limit)
+            usage = int(raw_usage)
+        except (OSError, ValueError):
+            continue
+        if limit <= 0 or limit >= _CGROUP_UNLIMITED_BYTES or usage < 0:
+            continue
+        return (
+            limit // _BYTES_PER_KIB,
+            max(limit - usage, 0) // _BYTES_PER_KIB,
+        )
+    return None
+
+
+def _apply_cgroup_memory_boundary(
+    sample: Dict[str, Any],
+    cgroup: Optional[Tuple[int, int]],
+) -> None:
+    """Replace host memory with a smaller finite cgroup boundary in-place."""
+    if cgroup is None:
+        return
+    cgroup_total_kib, cgroup_available_kib = cgroup
+    host_total_kib = sample.get("mem_total_kib")
+    if not isinstance(host_total_kib, int) or cgroup_total_kib < host_total_kib:
+        sample["mem_total_kib"] = cgroup_total_kib
+        sample["mem_available_kib"] = cgroup_available_kib
+
+
+def sample_memory() -> Dict[str, Any]:
+    """Cheap memory snapshot: own RSS + effective availability + swap.
+
+    Linux-only (returns ``{}`` elsewhere), never raises. A finite cgroup
+    boundary smaller than host RAM replaces the host-wide total/available
+    pair so containers report their actual OOM budget. Values are KiB to
+    match the kernel's units.
     """
     sample: Dict[str, Any] = {}
     try:
@@ -109,6 +199,7 @@ def sample_memory() -> Dict[str, Any]:
             sample["swap_used_kib"] = meminfo["SwapTotal"] - meminfo["SwapFree"]
     except (OSError, ValueError, IndexError):
         pass
+    _apply_cgroup_memory_boundary(sample, _sample_cgroup_memory())
     return sample
 
 

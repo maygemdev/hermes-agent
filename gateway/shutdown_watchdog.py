@@ -277,7 +277,8 @@ def write_loop_heartbeat(
     # heartbeat doubles as a rolling pre-death telemetry snapshot: after an
     # unclean death (SIGKILL/OOM/VM loss) the last heartbeat is the closest
     # surviving record of memory pressure — see gateway.lifecycle_ledger
-    # (NS-608).  Best-effort; <1ms of /proc reads on Linux, {} elsewhere.
+    # (NS-608). Best-effort; <1ms of procfs/cgroup reads on Linux, {}
+    # elsewhere.
     try:
         from gateway.lifecycle_ledger import sample_memory
 

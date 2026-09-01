@@ -9658,8 +9658,8 @@ DERIVED_MAX_IN_PROGRESS_CEILING = 8
 def _system_memory_sample() -> dict:
     """Best-effort system memory snapshot (KiB values), ``{}`` when unknown.
 
-    Delegates to :func:`gateway.lifecycle_ledger.sample_memory` (pure /proc
-    reads, Linux-only, never raises). Local import keeps ``kanban_db``
+    Delegates to :func:`gateway.lifecycle_ledger.sample_memory` (procfs and
+    cgroup reads, Linux-only, never raises). Local import keeps ``kanban_db``
     importable in stripped-down environments without the gateway package.
     Module-level indirection is also the test seam — the shared conftest
     patches this to ``{}`` so suite results don't depend on the CI runner's
@@ -9675,10 +9675,10 @@ def _system_memory_sample() -> dict:
 def derive_default_max_in_progress(sample: Optional[Mapping[str, Any]] = None) -> Optional[int]:
     """Memory-derived default for ``kanban.max_in_progress`` when unset.
 
-    ``clamp(MemTotal / MEMORY_GUARD_MB_PER_WORKER, FLOOR, CEILING)`` — e.g.
-    a 1 GiB VM derives 2, a 4 GiB VM derives 8. Returns ``None`` (no cap,
-    pre-fix behaviour) when total memory can't be determined, so dev
-    machines on macOS/Windows are unaffected.
+    ``clamp(effective total / MEMORY_GUARD_MB_PER_WORKER, FLOOR, CEILING)`` —
+    e.g. a 1 GiB VM derives 2, a 4 GiB VM or container derives 8. Returns
+    ``None`` (no cap, pre-fix behaviour) when total memory can't be
+    determined, so dev machines on macOS/Windows are unaffected.
     """
     if sample is None:
         sample = _system_memory_sample()
